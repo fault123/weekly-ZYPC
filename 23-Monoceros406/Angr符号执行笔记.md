@@ -79,6 +79,100 @@ initial_state=project.factory.entry_state()
 | `full_init_state`    | （不常用）共享库和预定义内容已经加载完毕，例如刚加载玩共享库。 |
 | `call_status`        | （不常用）准备调用函数的状态。                               |
 
+手动指定开始地址：
+
+```python
+initial_state=project.factory.blank_state(addr=0x4007E8)
+```
+
+当没有库函数后，需要Hook函数：
+
+```python
+#对算法分析没有帮助，直接return
+project.hook_symble('printf',angr.SIM_PROCEDURES['stubs']['ReturnUnconstrained'](),replace=True)
+project.hook_symble('fflush',angr.SIM_PROCEDURES['stubs']['ReturnUnconstrained'](),replace=True)
+```
+
 ## 模拟管理器
 
-挖坑待填...
+```python
+simulation=project.factory.simulation_manager(initial_state)
+simulation.explore(find=0x0040179E,avoid=0x004016E6)
+```
+
+find、avoid具名参数分别表示目标地址和需要回避的地址，如果不唯一，可以以list形式传参。
+
+## 优化
+
+* 开启LAZY_SOLVES，显著加速，但可能会无解。
+
+    ```python
+    simulation.one_active.options.add(angr.options.LAZY_SOLVES)
+    ```
+
+* 取缔标准输入，直接写入内存，创建用户输入：
+
+    ```python
+    p=angr.Project('./baby-re',auto_load_libs=False)
+    state=p.factory.blank_state(addr=0x4028E0)
+    flags_chars=[claripy.BVS('flag_%d'%i,32)for i in range(13)]
+    for i in xrange(13):
+        state.mem[state.regs.rsp+i*4].dword=flag_chars[i]
+    state.regs.rdi=state.regs.rsp
+    s=p.factory.simulation_manager(state)
+    s.one_active.options.add(angr.options.LAZY_SOLVES)
+    s.explore(find=0x4028E9,avoid=0x402941)
+    flag=''.join(chr(s.one_found.solver.eval(c))for c in flag_chars)
+    print(flag)
+    ```
+
+* 有时函数返回false的方式为内存写入，利用IDAPython提取：
+
+    ```python
+    import idc
+    p=0x850
+    end=0x10FF5
+    addr=[]
+    while p<=end:
+        asm=idc.GetDisasm(p)
+        if asm=='mov	[rbp+var_1E49], 0':
+            addr.append(p+0x400000)
+        p=idc.NextHead(p)
+    print(addr)
+    ```
+
+    程序可能开启PIE保护，但是在angr中，固定在0x400000处。
+
+    ```python
+    avoids=[...]
+    avoids.append(0x110EC+0x400000)
+    proj=angr.Project('./sakura')
+    state=proj.factory.entry_state()
+    simgr=proj.factory.simulation_manager(state)
+    simgr.one_active.options.add(angr.options.LAZY_SOLVES)
+    simgr.explore(find=(0x110CA+0x400000),avoid=avoids)
+    found=simgr.one_found
+    flag=found.solver.eval(found.memory.load(0x612040,400),cast_to=bytes)
+    ```
+
+    继续优化：
+
+    ```python
+    state=proj.factory.blank_state(addr=(0x110BA+0x400000))
+    simfd=state.posix.get_fd(0)
+    data,real_size=simfd.read_data(400)
+    state.memory.store(0x6121E0,data)
+    ```
+
+* Hook函数方法：
+
+    ```python
+    def set_hook(addrs,hooks):
+        for i in addrs:
+            proj.hook(i,hook=hooks,length=5)
+    def my_sub_11146(state):
+        state.regs.rax=state.regs.rdi+24
+        return
+    t=[...]
+    set_hook(t,my_sub_11146)
+    ```
